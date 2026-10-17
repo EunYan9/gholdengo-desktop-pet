@@ -1,0 +1,63 @@
+<!doctype html><meta charset="utf-8"><title>索财灵原动作本地渲染</title>
+<script src="https://static.sketchfab.com/api/sketchfab-viewer-1.12.1.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<style>body{margin:0;background:transparent}iframe{border:0;width:512px;height:512px}</style>
+<iframe id="model" allow="autoplay"></iframe>
+<script>
+new QWebChannel(qt.webChannelTransport, async channel=>{
+  const bridge=channel.objects.exporter;
+  const stage=new URLSearchParams(location.search).get('model')||'chest';
+  const uid={chest:'68bbff72defd42808c713d914e46ad66',roaming:'c70b33ba97674401bff5b03f3068c2ea',gholdengo:'450f19056379446cb57716b726c39929'}[stage];
+  const client=new Sketchfab('1.12.1',document.querySelector('iframe'));
+  client.init(uid,{autostart:1,preload:1,transparent:1,ui_infos:0,ui_controls:0,ui_hint:0,tracking:0,camera:0,
+    success(api){api.addEventListener('viewerready',async()=>{
+      const call=(method,...args)=>new Promise((resolve,reject)=>{
+        const timeout=setTimeout(()=>reject(new Error(method+' timed out')),30000);
+        api[method](...args,(err,result)=>{clearTimeout(timeout);err?reject(new Error(method)):resolve(result);});
+      });
+      const capture=(clip,index,data)=>new Promise(resolve=>bridge.frame(stage,clip,index,data,resolve));
+      try{
+        await call('setEnableCameraConstraints',false,{});await call('setFov',35);await call('recenterCamera');
+        // Recenter fits the model using the current FOV. Widen only afterward,
+        // otherwise the fit cancels the extra breathing room for antennae/jumps.
+        if(stage==='roaming')await call('setFov',55);
+        if(stage==='gholdengo')await call('setFov',45);
+        await call('pause');
+        const list=await call('getAnimations');
+        const tracks=Array.from(list).filter(Array.isArray).map(([uid,name,duration])=>({uid,name:name.replace(/^.*_\d{5}_/,''),duration}));
+        let wanted=['defaultwait01_loop','battlewait01_loop','defaultidle02','glad01','notice01'];
+        if(stage==='chest')wanted.push('defaultidle01','hate01','sleep01_start','sleep01_loop','sleep01_end');
+        else wanted.push('refresh01','rest01_start','rest01_loop','rest01_end','roar01');
+        const subset=new URLSearchParams(location.search).get('clips');if(subset)wanted=subset.split(',');
+        if(subset==='catalog'){bridge.catalog(stage,JSON.stringify(tracks));bridge.done(stage);return;}
+        if(subset==='inspect'){
+          bridge.inspection(stage,JSON.stringify({materials:await call('getMaterialList'),graph:await call('getSceneGraph'),textures:await call('getTextureList')}));
+          bridge.done(stage);return;
+        }
+        for(const name of wanted){
+          const track=tracks.find(t=>t.name===name);if(!track)throw new Error('Missing '+name);
+          const count=Math.ceil(track.duration*30);
+          bridge.progress(stage+' / '+name+' / '+count+' frames');
+          await call('setCurrentAnimationByUID',track.uid);
+          // The selection callback can precede animation decode/upload. Warm
+          // the track before sampling so initial frames are not stale/T-poses.
+          await call('play');
+          await call('seekTo',Math.min(track.duration*.5,.5));
+          await new Promise(resolve=>setTimeout(resolve,1500));
+          await call('pause');await call('seekTo',0);
+          await new Promise(resolve=>setTimeout(resolve,300));
+          for(let i=0;i<count;i++){
+            // Sample the original pose at 30fps. Screenshot API renders the current pose.
+            await call('seekTo',Math.min(track.duration-0.001,i/30));
+            await new Promise(resolve=>setTimeout(resolve,38));
+            const data=await call('getScreenShot',384,384,'image/png');
+            const ok=await capture(name,i,data);if(!ok)throw new Error('Frame save failed');
+          }
+          bridge.clipDone(stage,name,track.duration,count);
+        }
+        bridge.done(stage);
+      }catch(e){bridge.failure(String(e.message));}
+    });api.start();},error(){bridge.failure('Model load failed');}
+  });
+});
+</script>
