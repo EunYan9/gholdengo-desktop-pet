@@ -228,6 +228,10 @@ class Pet(QWidget):
 
     def update_activity(self, snapshot):
         if snapshot.get('completed_turns'):
+            # Exact-turn completions are already deduplicated by the tracker.
+            # The worker Event coalesces a batch and queues a refresh even if
+            # a quota read is still running; this is independent of sound.
+            self.request_refresh()
             self.sound.play()
         self.tasks_popup.set_tasks(snapshot.get('tasks',[]),snapshot['state'])
         if snapshot['state']!='working':self.tasks_popup.hide();self.task_hide.stop()

@@ -11,10 +11,12 @@ app=QApplication.instance() or QApplication([])
 def run(ms):
     loop=QEventLoop();QTimer.singleShot(ms,loop.quit);loop.exec()
 
-snapshots=[{'state':'working','count':1,'active_ids':['abc'],'outcomes':{}},
-           {'state':'working','count':1,'active_ids':['def'],'outcomes':{'abc':'completed'}},
-           {'state':'working','count':1,'active_ids':['def'],'outcomes':{'abc':'completed'}},
-           {'state':'idle','count':0,'active_ids':[],'outcomes':{'abc':'completed','def':'completed'}}]
+snapshots=[{'state':'working','count':1,'active_ids':['abc'],'outcomes':{},'active_turns':{'abc':'a1'}},
+           {'state':'working','count':1,'active_ids':['def'],'outcomes':{'abc':'completed'},
+            'active_turns':{'def':'d1'},'finished_turns':[{'thread_id':'abc','turn_id':'a1','status':'completed'}]},
+           {'state':'working','count':1,'active_ids':['def'],'outcomes':{'abc':'completed'},'active_turns':{'def':'d1'}},
+           {'state':'idle','count':0,'active_ids':[],'outcomes':{'abc':'completed','def':'completed'},
+            'finished_turns':[{'thread_id':'def','turn_id':'d1','status':'completed'}]}]
 class Stop:
     index=0
     def is_set(self):return self.index>=len(snapshots)
@@ -28,8 +30,10 @@ try:worker.run()
 finally:main.read_activity=original
 assert len(events)==4 and events[1]['tasks'][0]['id']=='def'
 assert events[2]['tasks'][0]['total_tokens']==102 and events[-1]['outcome']=='completed'
+assert [event['completed_turns'] for event in events]==[[],['a1'],[],['d1']]
 
 pet=Pet(demo=True,stage='chest');pet.show();run(40)
+pet.sound.enabled=False  # Do not play audio even if local saved settings enable it.
 pet.tasks_popup.set_tasks([{'id':'rounding','title':'圆角检查'}])
 pet.tasks_popup.show_at(QPoint(200,200));run(10)
 image=pet.tasks_popup.grab().toImage()
@@ -38,6 +42,23 @@ for x,y in ((0,0),(image.width()-1,0),(0,image.height()-1),(image.width()-1,imag
 for x,y in ((5,25),(image.width()-6,25),(image.width()//2,5),(image.width()//2,image.height()-5)):
     assert image.pixelColor(x,y).getRgb()==(32,46,53,255),image.pixelColor(x,y).getRgb()
 pet.tasks_popup.hide()
+# Completion refresh works with sound disabled and while another chat runs.
+# A plain status/count update or an interrupted/failed ending must not trigger it.
+assert not pet.sound.enabled
+for event in events:
+    pet.worker.refresh.clear();pet.update_activity(event)
+    assert pet.worker.refresh.is_set()==bool(event['completed_turns'])
+pet.worker.refresh.clear()
+pet.update_activity({'state':'idle','count':0,'tasks':[],'completed_turns':[],'outcome':'interrupted'})
+assert not pet.worker.refresh.is_set()
+pet.update_activity({'state':'idle','count':0,'tasks':[],'completed_turns':[],'outcome':'failed'})
+assert not pet.worker.refresh.is_set()
+# Several completions delivered together request one refresh, not one per turn.
+requests=[];original_refresh=pet.request_refresh
+pet.request_refresh=lambda:requests.append('refresh')
+pet.update_activity({'state':'idle','count':0,'tasks':[],'completed_turns':['x1','y1']})
+assert requests==['refresh']
+pet.request_refresh=original_refresh
 now=time.time()
 def quota(remaining,when):
     return {'retrieved_at':when,'remaining':50,'blocked':False,'windows':[
@@ -72,4 +93,4 @@ pet.daily_toggle.setChecked(True);assert pet.view.mapToGlobal(QPoint()).x()==old
 pet.update_quota(quota(70-limit*1.2,now+.05))
 assert '5小时' in pet.header.text() and '周' in pet.header.text()
 pet.shutdown();pet.close()
-print('PASS: task replacement and token updates with same count; fixed budget and reminders; offline state; badge-only hover; escaped titles; close on leave; unchanged header; stable pet position')
+print('PASS: completion-triggered quota refresh while muted or other tasks run; batched completions; task replacement and token updates; budget reminders; opaque rounded hover panel; stable pet position')
