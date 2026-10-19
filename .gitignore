@@ -39,3 +39,6 @@ auth.json
 **/*.sqlite*
 
 **/config.json
+
+# ChatGPT website sign-in, browser storage and private conversation shortcuts
+**/chatgpt-data/

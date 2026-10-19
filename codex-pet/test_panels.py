@@ -30,6 +30,14 @@ assert len(events)==4 and events[1]['tasks'][0]['id']=='def'
 assert events[2]['tasks'][0]['total_tokens']==102 and events[-1]['outcome']=='completed'
 
 pet=Pet(demo=True,stage='chest');pet.show();run(40)
+pet.tasks_popup.set_tasks([{'id':'rounding','title':'圆角检查'}])
+pet.tasks_popup.show_at(QPoint(200,200));run(10)
+image=pet.tasks_popup.grab().toImage()
+for x,y in ((0,0),(image.width()-1,0),(0,image.height()-1),(image.width()-1,image.height()-1)):
+    assert image.pixelColor(x,y).alpha()==0
+for x,y in ((5,25),(image.width()-6,25),(image.width()//2,5),(image.width()//2,image.height()-5)):
+    assert image.pixelColor(x,y).getRgb()==(32,46,53,255),image.pixelColor(x,y).getRgb()
+pet.tasks_popup.hide()
 now=time.time()
 def quota(remaining,when):
     return {'retrieved_at':when,'remaining':50,'blocked':False,'windows':[
@@ -48,6 +56,7 @@ pet.error('测试离线');assert '离线' in pet.daily.foot.text()
 missing=quota(70,now+.04);missing['windows']=missing['windows'][:1]
 pet.update_quota(missing);assert '离线' in pet.daily.foot.text()
 pet.update_activity({'state':'working','count':1,'tasks':[{'id':'abc','title':'<script>标题</script>','total_tokens':120,'turn_tokens':20}]})
+assert pet.tasks_popup.title.text()=='Codex · 正在运行 1 个任务'
 def move(point):
     event=QMouseEvent(QMouseEvent.Type.MouseMove,point.toPointF(),pet.view.mapToGlobal(point).toPointF(),Qt.MouseButton.NoButton,Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier)
     app.sendEvent(pet.view,event)

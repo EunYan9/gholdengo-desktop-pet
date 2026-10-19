@@ -35,11 +35,11 @@ def writer_is_live(path):
         return None
 
 
-def read_activity(home=None, lock_probe=writer_is_live, watching=()):
+def read_activity(home=None, lock_probe=writer_is_live, watching=(), watched_turns=None):
     home = Path(home) if home else Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))
     try:
         con = sqlite3.connect((home/'thread_history_1.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.3)
-        outcomes = {}
+        outcomes = {}; active_turns = {}; finished_turns = []
         try:
             con.execute('PRAGMA query_only=ON')
             rows = con.execute('''SELECT thread_id FROM thread_turns AS t
@@ -52,6 +52,22 @@ def read_activity(home=None, lock_probe=writer_is_live, watching=()):
                 result = con.execute('''SELECT status FROM thread_turns
                     WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1''', (thread_id,)).fetchone()
                 if result and result[0] != 'inProgress': outcomes[thread_id] = result[0]
+            # Track exact turns, including those that finish while other chats run.
+            # Older desktop schemas can still provide the original activity state.
+            try:
+                turn_rows = con.execute('''SELECT thread_id,turn_id FROM thread_turns AS t
+                    WHERE status='inProgress' AND completed_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM thread_turns AS newer
+                        WHERE newer.thread_id=t.thread_id AND newer.rollout_ordinal>t.rollout_ordinal)''').fetchall()
+                active_turns = dict(turn_rows)
+                for turn, thread in (watched_turns or {}).items():
+                    result = con.execute('''SELECT status FROM thread_turns
+                        WHERE thread_id=? AND turn_id=? ORDER BY rollout_ordinal DESC LIMIT 1''',
+                        (thread, turn)).fetchone()
+                    if result and result[0] != 'inProgress':
+                        finished_turns.append({'thread_id':thread, 'turn_id':turn, 'status':result[0]})
+            except sqlite3.OperationalError:
+                active_turns = {}; finished_turns = []
         finally:
             con.close()
         active_ids = []; unknown = False
@@ -63,6 +79,8 @@ def read_activity(home=None, lock_probe=writer_is_live, watching=()):
             if live is True: active_ids.append(thread_id)
             unknown |= live is None
         return {'state': 'working' if active_ids else ('unknown' if unknown else 'idle'),
-                'count': len(active_ids), 'active_ids': active_ids, 'outcomes': outcomes}
+                'count': len(active_ids), 'active_ids': active_ids, 'outcomes': outcomes,
+                'active_turns': {thread:active_turns[thread] for thread in active_ids if thread in active_turns},
+                'finished_turns':finished_turns}
     except (OSError, sqlite3.Error, ValueError):
         return {'state': 'unknown', 'count': 0, 'active_ids': [], 'outcomes': {}}

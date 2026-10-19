@@ -8,6 +8,54 @@ def snapshot(remaining,when,reset=None):
     return {'retrieved_at':when,'windows':[{'remaining':remaining,'minutes':10080,'resets_at':reset or at(24,6)}]}
 
 class DailyTests(unittest.TestCase):
+    def test_early_reset_reallocates_without_double_budget(self):
+        now=[at(18,2)];b=DailyBudget(clock=lambda:now[0])
+        b.observe(snapshot(66,now[0]))
+        now[0]=at(18,4);b.observe(snapshot(57,now[0]))
+        now[0]=at(18,15);reset=now[0]+7*DAY
+        b.observe(snapshot(100,now[0],reset))
+        self.assertEqual(b.view()['days'],7)
+        self.assertEqual(b.view()['used'],9)
+        self.assertAlmostEqual(b.view()['left'],100/7)
+        self.assertEqual(b.view()['reset'],reset)
+        now[0]=at(19);b.observe(snapshot(98,now[0],reset))
+        self.assertEqual(b.view()['days'],6)
+        self.assertAlmostEqual(b.view()['segment_limit'],98/6)
+
+    def test_moving_unused_window_and_first_usage_survive_restart(self):
+        now=[at(18,15)]
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
+            path=Path(d)/'budget.json';b=DailyBudget(path,lambda:now[0])
+            for minute in (0,3,6,9):
+                now[0]=at(18,15,minute);reset=now[0]+7*DAY
+                b.observe(snapshot(100,now[0],reset))
+                self.assertEqual(len(b.records),1)
+                self.assertEqual(b.view()['reset'],reset)
+                self.assertAlmostEqual(b.view()['limit'],100/7)
+            b=DailyBudget(path,lambda:now[0])
+            now[0]+=181;reset=now[0]+7*DAY
+            b.observe(snapshot(99,now[0],reset))
+            self.assertEqual(len(b.records),1)
+            self.assertEqual(b.view()['used'],1)
+            self.assertAlmostEqual(b.view()['left'],100/7-1)
+
+    def test_legacy_moving_windows_merge(self):
+        now=[at(18,15,12)]
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
+            path=Path(d)/'budget.json'
+            rows=[dict(day=at(18),reset=at(18,15,m)+7*DAY,observed_at=at(18,15,m),
+                       began_at=at(18,15,m),baseline=100,limit=100/7,used=0,days=7,alerts=[])
+                  for m in (0,3,6)]
+            # Old code updated observations while keeping a slightly older
+            # reset timestamp, so checking observed_at alone misses duplicates.
+            rows[-1]['observed_at']+=190
+            path.write_text(json.dumps({'version':2,'records':rows,'samples':[]}))
+            b=DailyBudget(path,lambda:now[0])
+            b.observe(snapshot(99,now[0],now[0]+7*DAY))
+            self.assertEqual(len(b.records),1)
+            self.assertEqual(b.view()['used'],1)
+            self.assertAlmostEqual(b.view()['limit'],100/7)
+
     def test_backfill_repairs_installed_midday_zero(self):
         now=[at(17,14)];b=DailyBudget(clock=lambda:now[0])
         b.observe(snapshot(83,now[0]));self.assertEqual(b.current['used'],0)

@@ -18,6 +18,7 @@ from daily_budget import DailyBudget, day_start
 from task_usage import TaskUsageReader
 from quota_history import QuotaHistory
 from companion_panels import DailyCard, TaskPopup
+from completion_sound import CompletionTracker, CompletionSound
 
 ROOT = Path(__file__).resolve().parent
 
@@ -80,10 +81,12 @@ class ActivityWorker(QObject):
     def run(self):
         previous = None
         watching = set()
+        completions = CompletionTracker()
         while not self.stop.is_set():
-            snapshot = read_activity(watching=watching)
+            snapshot = read_activity(watching=watching, watched_turns=completions.pending)
             visible = {'state':snapshot['state'], 'count':snapshot['count'],
-                       'tasks':self.details.read(snapshot['active_ids'])}
+                       'tasks':self.details.read(snapshot['active_ids']),
+                       'completed_turns':completions.observe(snapshot)}
             if previous and previous['state'] == 'working' and visible['state'] == 'idle':
                 outcomes = snapshot['outcomes']
                 statuses = [outcomes.get(thread_id, 'unknown') for thread_id in watching]
@@ -92,7 +95,7 @@ class ActivityWorker(QObject):
                                             ('interrupted' if 'interrupted' in statuses else 'unknown')))
             watching.update(snapshot['active_ids'])
             if visible['state'] != 'working': watching.clear()
-            if previous is None or any(visible[key] != previous[key] for key in ('state','count','tasks')):
+            if visible['completed_turns'] or previous is None or any(visible[key] != previous[key] for key in ('state','count','tasks')):
                 self.updated.emit(visible)
             previous = visible
             self.stop.wait(1)
@@ -150,6 +153,7 @@ class Pet(QWidget):
         self.stage = 'gholdengo'
         self.last_snapshot = None
         self.quota_offline = False
+        self.sound = CompletionSound(self, ROOT/'sounds'/'task-complete.wav')
         self.budget = DailyBudget(None if demo else ROOT/'daily_budget.json')
         self.daily = DailyCard(self)
         self.tasks_popup = TaskPopup(self)
@@ -173,16 +177,16 @@ class Pet(QWidget):
         self.activity_status = self.menu.addAction('Codex · 状态同步中')
         self.activity_status.setEnabled(False)
         self.menu.addSeparator()
+        self.menu.addAction('与 ChatGPT 对话', self.open_chatgpt)
+        self.menu.addAction('与 Codex 对话', self.open_codex)
+        self.sound_toggle = self.menu.addAction('任务完成音效')
+        self.sound_toggle.setCheckable(True); self.sound_toggle.setChecked(False)
+        self.sound_toggle.toggled.connect(self.toggle_sound)
+        self.menu.addSeparator()
         self.menu.addAction('立即同步额度', self.request_refresh)
         self.daily_toggle = self.menu.addAction('显示每日建议')
         self.daily_toggle.setCheckable(True);self.daily_toggle.setChecked(True)
         self.daily_toggle.toggled.connect(self.toggle_daily)
-        previews = self.menu.addMenu('预览形态')
-        for name, value in [('跟随真实额度', None), ('赛富豪', 'gholdengo'),
-                            ('宝箱', 'chest'), ('徒步', 'roaming'), ('低额度休眠', 'depleted')]:
-            action = previews.addAction(name)
-            action.triggered.connect(lambda checked=False, s=value: self.force(s))
-        self.menu.addAction('预览情绪与工作陪伴', self.open_review)
         self.menu.addSeparator()
         self.menu.addAction('退出灵宠', QApplication.instance().quit)
         icon = QIcon()
@@ -199,6 +203,7 @@ class Pet(QWidget):
         try:
             position = json.loads((ROOT / 'position.json').read_text(encoding='utf-8'))
             if position.get('daily_visible') is False:self.daily_toggle.setChecked(False)
+            if position.get('completion_sound') is True:self.sound_toggle.setChecked(True)
             point = QPoint(int(position['x'])-(118 if position.get('layout_version')!=2 else 0), int(position['y']))
             if any(screen.availableGeometry().intersects(self.geometry().translated(point-self.pos()))
                    for screen in QApplication.screens()):
@@ -222,6 +227,8 @@ class Pet(QWidget):
             self.activity.thread.start()
 
     def update_activity(self, snapshot):
+        if snapshot.get('completed_turns'):
+            self.sound.play()
         self.tasks_popup.set_tasks(snapshot.get('tasks',[]),snapshot['state'])
         if snapshot['state']!='working':self.tasks_popup.hide();self.task_hide.stop()
         self.view.set_working(snapshot['state'] == 'working', outcome=snapshot.get('outcome', 'unknown'))
@@ -234,6 +241,11 @@ class Pet(QWidget):
 
     def show_tasks(self,point):
         self.task_hide.stop();self.tasks_popup.show_at(point)
+
+    def toggle_sound(self, enabled):
+        self.sound.enabled = enabled
+        if not enabled:self.sound.stop()
+        self.save_position()
 
     def toggle_daily(self,visible):
         old_x=self.view.mapToGlobal(QPoint()).x()
@@ -307,18 +319,26 @@ class Pet(QWidget):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.setVisible(not self.isVisible())
 
-    def open_review(self):
-        from review import Review
-        if not hasattr(self, 'review') or not self.review.isVisible():
-            self.review = Review()
-        self.review.show()
-        self.review.raise_()
+    def open_chatgpt(self):
+        self.open_desktop('chatgpt')
+
+    def open_codex(self):
+        self.open_desktop('codex')
+
+    def open_desktop(self, mode):
+        from desktop_chat import NativeChatBridge
+        if not hasattr(self,'desktop_bridge'):
+            self.desktop_bridge=NativeChatBridge(self)
+            self.desktop_bridge.failed.connect(lambda text:self.tray.showMessage(
+                '赛富豪 · 打开对话', text, QSystemTrayIcon.MessageIcon.Warning, 6000))
+        self.desktop_bridge.open(mode)
 
     def save_position(self):
         temporary = ROOT / 'position.json.tmp'
         try:
             temporary.write_text(json.dumps({'x':self.x(), 'y':self.y(),'layout_version':2,
-                                              'daily_visible':self.daily_toggle.isChecked()}), encoding='utf-8')
+                                              'daily_visible':self.daily_toggle.isChecked(),
+                                              'completion_sound':self.sound_toggle.isChecked()}), encoding='utf-8')
             temporary.replace(ROOT / 'position.json')
         except OSError:
             pass
@@ -333,8 +353,8 @@ class Pet(QWidget):
         self.activity.close()
         self.tray.hide()
         self.view.stop()
-        if hasattr(self, 'review'):
-            self.review.close()
+        self.sound.stop()
+        if hasattr(self,'desktop_bridge'):self.desktop_bridge.cancel()
 
     def closeEvent(self, event):
         QApplication.instance().quit()
@@ -346,6 +366,7 @@ def main():
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--stage', choices=['chest','roaming','depleted','gholdengo'])
     parser.add_argument('--quit-after', type=int, default=0)
+    parser.add_argument('--chatgpt', action='store_true', help='Open desktop Chat mode after startup')
     args = parser.parse_args()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -355,6 +376,7 @@ def main():
     pet = Pet(args.demo, args.stage)
     app.aboutToQuit.connect(pet.shutdown)
     pet.show()
+    if args.chatgpt:QTimer.singleShot(200,pet.open_chatgpt)
     if args.quit_after:
         QTimer.singleShot(args.quit_after * 1000, app.quit)
     result = app.exec()
